@@ -90,7 +90,7 @@ def get_database_schema() -> str:
 # Tool: execute_read_only_sql
 # ---------------------------------------------------------------------------
 @mcp.tool()
-def execute_read_only_sql(query: str) -> str:
+def execute_read_only_sql(query: str, limit: int = 100, offset: int = 0) -> str:
     """
     Execute a read-only SELECT query against the shop database and return
     the results as a JSON array of objects.
@@ -105,18 +105,18 @@ def execute_read_only_sql(query: str) -> str:
         query (str): A valid SQLite SELECT statement. Must not contain
             mutation keywords (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE,
             REPLACE, TRUNCATE). Trailing semicolons are stripped automatically.
+        limit (int): Maximum number of rows to return (default: 100).
+        offset (int): Number of rows to skip for pagination (default: 0).
 
     Returns:
         On success — a JSON string containing an array of row objects, e.g.:
             [{"first_name": "Alice", "total": 1234.56}, ...]
-        Row count is capped at 100. If you need fewer rows, add LIMIT explicitly.
         On security violation — a string starting with "Security error:".
-        On SQL error — a plain-text SQLite error message (no stack trace).
+        On SQL error — a structured JSON error message.
 
     Constraints:
         - Read-only: any query containing INSERT / UPDATE / DELETE / DROP /
           ALTER / CREATE / REPLACE / TRUNCATE is rejected immediately.
-        - Maximum 100 rows returned per call. Add LIMIT N to override.
         - The underlying SQLite connection is opened in read-only mode (URI
           mode=ro), so writes are impossible even if the keyword filter
           were bypassed.
@@ -129,10 +129,10 @@ def execute_read_only_sql(query: str) -> str:
             "Only read-only SELECT queries are allowed."
         )
 
-    # Auto-append LIMIT 100 when the query has no explicit limit
+    # Auto-append LIMIT and OFFSET when the query has no explicit limit
     safe_query = query.rstrip().rstrip(";")
     if not _LIMIT_PATTERN.search(safe_query):
-        safe_query = f"{safe_query} LIMIT 100"
+        safe_query = f"{safe_query} LIMIT {limit} OFFSET {offset}"
 
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -145,7 +145,60 @@ def execute_read_only_sql(query: str) -> str:
         result = [dict(row) for row in rows]
         return json.dumps(result, indent=2, default=str)
     except sqlite3.Error as exc:
-        return str(exc)
+        return json.dumps({
+            "error": "SQL_ERROR",
+            "message": str(exc),
+            "suggestion": "Check your SQL syntax or call get_database_schema to see available tables."
+        }, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_table_summary
+# ---------------------------------------------------------------------------
+@mcp.tool()
+def get_table_summary(table_name: str) -> str:
+    """
+    Return a summary of a specific table, including row count and the first 5 rows.
+
+    When to use:
+        Use this tool to quickly inspect the contents and size of a table without
+        writing a custom SQL query.
+
+    Parameters:
+        table_name (str): The name of the table to summarize.
+
+    Returns:
+        A JSON string containing the row count and a list of sample rows.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Verify table exists to prevent SQL injection on table_name
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        if not cursor.fetchone():
+            conn.close()
+            return json.dumps({"error": "TABLE_NOT_FOUND", "message": f"Table '{table_name}' does not exist."})
+        
+        cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        count = cursor.fetchone()["count"]
+        
+        cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
+        rows = [dict(row) for row in cursor.fetchall()]
+        
+        conn.close()
+        
+        return json.dumps({
+            "table": table_name,
+            "total_rows": count,
+            "sample_rows": rows
+        }, indent=2, default=str)
+    except sqlite3.Error as exc:
+        return json.dumps({
+            "error": "SQL_ERROR",
+            "message": str(exc)
+        }, indent=2)
 
 
 # ---------------------------------------------------------------------------

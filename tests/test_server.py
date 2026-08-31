@@ -35,7 +35,7 @@ def schema_for(conn: sqlite3.Connection) -> str:
     return "\n\n".join(row[0] for row in rows)
 
 
-def execute_query(conn: sqlite3.Connection, query: str) -> str:
+def execute_query(conn: sqlite3.Connection, query: str, limit: int = 100, offset: int = 0) -> str:
     # Security failsafe
     match = _MUTATION_PATTERN.search(query)
     if match:
@@ -46,7 +46,7 @@ def execute_query(conn: sqlite3.Connection, query: str) -> str:
 
     safe_query = query.rstrip().rstrip(";")
     if not _LIMIT_PATTERN.search(safe_query):
-        safe_query = f"{safe_query} LIMIT 100"
+        safe_query = f"{safe_query} LIMIT {limit} OFFSET {offset}"
 
     try:
         conn.row_factory = sqlite3.Row
@@ -56,7 +56,11 @@ def execute_query(conn: sqlite3.Connection, query: str) -> str:
         result = [dict(row) for row in rows]
         return json.dumps(result, indent=2, default=str)
     except sqlite3.Error as exc:
-        return str(exc)
+        return json.dumps({
+            "error": "SQL_ERROR",
+            "message": str(exc),
+            "suggestion": "Check your SQL syntax or call get_database_schema to see available tables."
+        }, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -179,5 +183,65 @@ class TestExecuteReadOnlySql:
 
     def test_invalid_sql_returns_error_string(self, db):
         result = execute_query(db, "SELECT * FROM nonexistent_table")
-        # Should return the sqlite3 error message as a string, not raise
-        assert "no such table" in result.lower()
+        error_dict = json.loads(result)
+        assert error_dict["error"] == "SQL_ERROR"
+        assert "no such table" in error_dict["message"].lower()
+
+    def test_pagination_params(self, db):
+        # Insert enough rows to test limit and offset
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE nums (n INTEGER)")
+        conn.executemany("INSERT INTO nums VALUES (?)", [(i,) for i in range(20)])
+        conn.commit()
+        
+        # Test limit
+        result = execute_query(conn, "SELECT * FROM nums", limit=5)
+        rows = json.loads(result)
+        assert len(rows) == 5
+        assert rows[0]["n"] == 0
+        
+        # Test offset
+        result_offset = execute_query(conn, "SELECT * FROM nums", limit=5, offset=10)
+        rows_offset = json.loads(result_offset)
+        assert len(rows_offset) == 5
+        assert rows_offset[0]["n"] == 10
+        conn.close()
+
+# ---------------------------------------------------------------------------
+# Test get_table_summary
+# ---------------------------------------------------------------------------
+def get_table_summary_logic(conn: sqlite3.Connection, table_name: str) -> str:
+    try:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        if not cursor.fetchone():
+            return json.dumps({"error": "TABLE_NOT_FOUND", "message": f"Table '{table_name}' does not exist."})
+        
+        cursor.execute(f"SELECT COUNT(*) as count FROM {table_name}")
+        count = cursor.fetchone()["count"]
+        
+        cursor.execute(f"SELECT * FROM {table_name} LIMIT 5")
+        rows = [dict(row) for row in cursor.fetchall()]
+        
+        return json.dumps({
+            "table": table_name,
+            "total_rows": count,
+            "sample_rows": rows
+        }, indent=2, default=str)
+    except sqlite3.Error as exc:
+        return json.dumps({"error": "SQL_ERROR", "message": str(exc)}, indent=2)
+
+class TestGetTableSummary:
+    def test_returns_summary(self, db):
+        result = get_table_summary_logic(db, "customers")
+        data = json.loads(result)
+        assert data["table"] == "customers"
+        assert data["total_rows"] == 2
+        assert len(data["sample_rows"]) == 2
+        assert data["sample_rows"][0]["name"] == "Alice"
+
+    def test_nonexistent_table(self, db):
+        result = get_table_summary_logic(db, "nonexistent")
+        data = json.loads(result)
+        assert data["error"] == "TABLE_NOT_FOUND"

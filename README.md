@@ -9,13 +9,15 @@ A **read-only** [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 | Tool | Description |
 |------|-------------|
 | `get_database_schema` | Returns DDL (CREATE TABLE statements) for all tables |
-| `execute_read_only_sql` | Executes a SELECT query and returns results as JSON |
+| `get_table_summary` | Returns a summary of a specific table, including row count and the first 5 sample rows |
+| `execute_read_only_sql` | Executes a SELECT query and returns results as JSON. Supports pagination via `limit` and `offset` arguments. |
 
-### Security Measures
+### Security & Robustness
 
 - **Mutation keyword blocking** – queries containing `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `REPLACE`, or `TRUNCATE` are rejected before reaching the database.
-- **Automatic LIMIT** – queries without an explicit `LIMIT` clause are automatically capped at 100 rows.
+- **Automatic Pagination** – `execute_read_only_sql` automatically caps results at 100 rows, but can be customized with explicit `limit` and `offset` parameters.
 - **Read-only SQLite URI** – the database is opened with `?mode=ro`, preventing any writes at the OS level.
+- **Structured Errors** – SQL errors are returned as a JSON structure to help agents easily understand and recover from mistakes.
 
 ---
 
@@ -54,12 +56,25 @@ pip install -r requirements.txt
 
 The server communicates via **stdio** (standard input/output), which is the transport used by MCP hosts.
 
+### Running Locally
+
 ```bash
 # Run with the default shop.db in the current directory
 python server.py
 
 # Run with a custom database path
 SHOP_DB_PATH=/path/to/my.db python server.py
+```
+
+### Running with Docker
+
+You can run the server in an isolated Docker container. Since MCP uses stdio, you must run the container in interactive mode (`-i`).
+
+```bash
+docker build -t shop-analytics-mcp .
+
+# Run the container (reads and writes to stdio)
+docker run -i --rm shop-analytics-mcp
 ```
 
 ---
@@ -140,6 +155,8 @@ python tests/smoke_test.py
 shop-analytics-mcp/
 ├── server.py           # FastMCP server (entry point)
 ├── create_shop_db.py   # One-time script to create demo shop.db
+├── Dockerfile          # Docker image configuration
+├── .dockerignore       # Files to ignore in Docker context
 ├── requirements.txt
 ├── README.md
 ├── SPEC.md             # Initial project specification
